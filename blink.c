@@ -15,8 +15,7 @@ static int medium = 21;
 static int high = 25;
 static int *current = &low;
 static int newValue = 0;
-int value = 0;
-int reading = 21;
+int value = 500;
 
 
 
@@ -38,7 +37,7 @@ void ConfigureADC(void);
 
 
 void main(void)
-{   WDTCTL = WDTPW + WDTHOLD; //stop WDT
+{
     BCSCTL1 = CALBC1_1MHZ;    //set DCO to 1MHz
     DCOCTL = CALDCO_1MHZ;     //set DCO to 1mhz
 
@@ -61,7 +60,7 @@ void main(void)
 	//setting up WDT to debounce button
     WDTCTL = WDTPW | WDTHOLD | WDTNMIES | WDTNMI; //WDT password + Stop WDT + detect RST button falling edge + set RST/NMI pin to NMI
     IFG1 &= ~(WDTIFG | NMIIFG);                   //reset WDT/NMI interrupt flags
-    IE1 |= WDTIE | NMIIE;                         //Enable WDT/NMI interrupt
+    IE1 |= WDTIE | NMIIE;                         //Enable interrupt
     _BIS_SR(CPUOFF + GIE);                        //Enter low power mode and enable interrupts
 }
 
@@ -76,6 +75,9 @@ __interrupt void TIMER1A_ISR (void)
             P1OUT ^= BIT0;  //Toggle P1.0
             control = 0;
         }
+        else if (control >3){
+            control = 0;
+        }
 
     }
     else {
@@ -86,6 +88,9 @@ __interrupt void TIMER1A_ISR (void)
                 P1OUT ^= BIT0;  //Toggle P1.0
                 control = 0;
             }
+            else if (control >blinkLimitOverride){
+                        control = 0;
+                    }
         }
 		//if user hasn't chosen mode then RED LED off
         else if (mode == 0)
@@ -95,10 +100,10 @@ __interrupt void TIMER1A_ISR (void)
         else{
             ADC10CTL0 |= ENC + ADC10SC;  //ADC Sampling and conversion start
 
-            if(value > reading){
+            if((*current)*34 > value){
                 blinkLimit = 6;
             }
-            else if (value < reading){
+            else if ((*current)*34 < value){
                 blinkLimit = 1;
             }
             else{
@@ -107,6 +112,10 @@ __interrupt void TIMER1A_ISR (void)
             control++;
             if (control == blinkLimit){
                 P1OUT ^= BIT0;  //Toggle P1.0
+                control = 0;
+            }
+            //avoid a situation where control increments forever
+            else if (control >blinkLimit){
                 control = 0;
             }
         }
@@ -120,17 +129,17 @@ __interrupt void PORT1_ISR(void)
         P1IE &= ~BIT3;                            //disable interrupts
         P1IFG &= ~BIT3;                           //clear interrupt flag
         if (P1IES & BIT3)
-        {                                         //if falling edge detected
-            Pressed |= B1;                        //set button1 flag
-            PressCountB1 = 0;                     //Reset Switch 2 long press count
+        {                                         //if falling edge
+            Pressed |= B1;                        //set pressed	flag
+            PressCountB1 = 0;                     //reset press count
         }
         else
         {                                         //Rising edge detected
-            Pressed &= ~B1;                       //Reset Switch 2 Pressed flag
-            PressRelease |= B1;                   //Set Press and Released flag
+            Pressed &= ~B1;                       //Reset pressed flag
+            PressRelease |= B1;                   //Set pressRelease flag
         }
         P1IES ^= BIT3;                            //Toggle edge detect
-        IFG1 &= ~WDTIFG;                          //Clear the interrupt flag for the WDT
+        IFG1 &= ~WDTIFG;                          //Clear WDT interrupt flag 
         WDTCTL = WDT_MDLY_32 | (WDTCTL & 0x007F); //Restart the WDT with the same NMI status as set by the NMI interrupt
     }
 }
@@ -140,23 +149,20 @@ __interrupt void NMI_ISR(void)
 {
     if (IFG1 & NMIIFG)  //Check if NMI interrupt was caused by nRST/NMI pin
     {
-        IFG1 &= ~NMIIFG;       //clear NMI interrupt flag
-        if (WDTCTL & WDTNMIES) //falling edge detected
+        IFG1 &= ~NMIIFG;       //clear interrupt flag
+        if (WDTCTL & WDTNMIES) //if falling edge
         {
-            Pressed |= B2;                 //Set Switch 2 Pressed flag
-            PressCountB2 = 0;              //Reset Switch 2 long press count
-            WDTCTL = WDT_MDLY_32 | WDTNMI; //WDT 32ms delay + set RST/NMI pin to NMI
-			//Note: WDT_MDLY_32 = WDTPW | WDTTMSEL | WDTCNTCL
-			//WDT password + Interval mode + clear count
-			//Note: this will also set the NMI interrupt to trigger on the rising edge
+            Pressed |= B2;                 //set pressed flag
+            PressCountB2 = 0;              //reset press count
+            WDTCTL = WDT_MDLY_32 | WDTNMI; //WDT 32ms + set RST/NMI pin to NMI
         }
         else  //rising edge detected
         {
-            Pressed &= ~B2;                           //Reset Switch 1 Pressed flag
-            PressRelease |= B2;                       //Set Press and Released flag
+            Pressed &= ~B2;                           //Reset pressed flag
+            PressRelease |= B2;                       //Set pressRelease flag
             WDTCTL = WDT_MDLY_32 | WDTNMIES | WDTNMI; //WDT 32ms delay + falling edge + set RST/NMI pin to NMI
         }
-    }  //Note that NMIIE is now cleared; the wdt_isr will set NMIIE 32ms later
+    } 
 }
 
 #pragma vector = WDT_VECTOR
@@ -175,7 +181,6 @@ __interrupt void WDT_ISR(void)
                 P1DIR &= ~BIT6;  //green LED (p1.6) off
                 P1SEL &= ~BIT6;
                 flag = ~flag;
-                control = 0;
                 UARTSendArray("Standby\n\r", 9);
             }
 
@@ -185,19 +190,19 @@ __interrupt void WDT_ISR(void)
                 switch(mode){
                     case 1:
                         UARTSendArray("low\n\r", 5);
-                        TA0CCR1 |= 1;
+                        TA0CCR1 |= 1;  //sets duty cycle low
                         current = &low;
                         mode++;
                         break;
                     case 2:
                         UARTSendArray("medium\n\r", 8);
-                        TA0CCR1 |= 500;
+                        TA0CCR1 |= 500;  //sets duty cycle to ~1/3 of period
                         current = &medium;
                         mode++;
                         break;
                     case 3:
                         UARTSendArray("high\n\r", 6);
-                        TA0CCR1 |= 1499;
+                        TA0CCR1 |= 1499;  //duty cycle = period
                         current = &high;
                         mode = 1;
                         break;
@@ -212,7 +217,6 @@ __interrupt void WDT_ISR(void)
             if (++PressCountB1 == 16){
                 flag = ~flag;
                 P1OUT &= ~BIT0;
-                control = 0;
                 UARTSendArray("Active\n\r", 8);
             }
         }
@@ -221,13 +225,12 @@ __interrupt void WDT_ISR(void)
     //Check if switch 2 is pressed
     if (Pressed & B2)
     {
-        if (++PressCountB2 == 32)  //Long press duration 32ms*32 = 1s
+        if (++PressCountB2 == 16)  //press duration 32ms*32 = 1s
         {
-			//if not in standby
+			//toggles override
             if(override){                                                   
                 if (++PressCountB1 == 125){
                     override = 0;
-                    control = 0;
                 }
 
                 else if (++PressCountB1 == 16 )  //Long press duration 32*32ms = 1s
@@ -240,11 +243,10 @@ __interrupt void WDT_ISR(void)
                 }
 
             }
-			//if in standby
+			//toggles override
             else{                                                           
                 if (++PressCountB1 == 125){
                     override = 1;
-                    control = 0;
                 }
             }
         }
@@ -258,16 +260,10 @@ __interrupt void WDT_ISR(void)
 
 
 void UARTSendArray(char *TxArray, char ArrayLength){
-//Send number of bytes Specified in ArrayLength in the array at using the hardware UART 0
-//Example usage: UARTSendArray("Hello", 5);
-//int data[2]={1023, 235};
-//UARTSendArray(data, 4);                                                                        
-//Note because the UART transmits bytes it is necessary to send two bytes for each integer hence the data length is twice the array length
-
     while(ArrayLength--){           //Loop until StringLength == 0 and post decrement
-        while(!(IFG2 & UCA0TXIFG)); //Wait for TX buffer to be ready for new data
-        UCA0TXBUF = *TxArray;       //Write the character at the location specified py the pointer
-        TxArray++;                  //Increment the TxString pointer to point to the next character
+        while(!(IFG2 & UCA0TXIFG)); //wait until txbuffer is ready
+        UCA0TXBUF = *TxArray;       //write character to TxArray location
+        TxArray++;                  //Increment to the next char
     }
 }
 
@@ -276,6 +272,7 @@ __interrupt void USCI0RX_ISR(void)
 {
     static char buffer[3];
 
+	//stores last 3 entered values
     buffer[0] = buffer[1];
     buffer[1] = buffer[2];
     buffer[2] = UCA0RXBUF;
@@ -285,16 +282,19 @@ __interrupt void USCI0RX_ISR(void)
     UARTSendArray(&data, 1);
     UARTSendArray("\n\r",2);
 
+	//checks for newline or carriage return
     if (buffer[2] == '\n' | buffer[2] == '\r' )
     {
         UARTSendArray(buffer, 3);
         UARTSendArray("\n\r",2);
 
+		//converts buffer to int
         newValue = atoi(buffer);
 
         UARTSendArray(numberStr,Int2DecStr(numberStr, newValue));
         UARTSendArray("\n\r",2);
 
+		// limit for new value
         if (newValue >= 5 && newValue <= 30)
         {
             *current = newValue;
@@ -305,7 +305,9 @@ __interrupt void USCI0RX_ISR(void)
             UARTSendArray("\n\r",2);
         }
 
-        newValue = 0;
+        newValue = 0;  //reset new val
+		
+		//print current thresholds
         UARTSendArray("L:", 2);
         UARTSendArray(numberStr,Int2DecStr(numberStr, low));
         UARTSendArray("\n\r",2);
@@ -327,7 +329,6 @@ __interrupt void USCI0RX_ISR(void)
 __interrupt void ADC10_ISR (void)
 {
     value = ADC10MEM;  //read ADC value
-    reading = 5 + (value-400)/600;
     UARTSendArray("V:", 2);
     UARTSendArray(numberStr,Int2DecStr(numberStr, value));
     UARTSendArray("\n\r",2);
@@ -364,37 +365,37 @@ char Int2DecStr(char *str, unsigned int value){
 void ConfigureTimer0A(void){
     /* Timer0_A Set-Up */
     TA0CCR0 |= 1500-1;        //PWM period
-    TA0CTL |= TASSEL_2+ MC_1; //ACLK, Up Mode (Counts to TA0CCR0)
+    TA0CTL |= TASSEL_2+ MC_1; //ACLK, Up Mode (Count to TA0CCR0)
     TA0CCTL1 |= OUTMOD_7;     //TA1CCR1 output mode = reset/set
 }
 
 void ConfigureTimer1A(void){
     /* Timer1_A Set-Up */
-    TA1CCR0 |= 1200 - 1;
-    TA1CCTL0 |= CCIE;          //TA1CCR1 output mode = reset/set
-    TA1CTL |= TASSEL_1 + MC_1; //SMCLK, Up Mode (Counts to TA1CCR0)
+    TA1CCR0 |= 1200 - 1;	   //timer counts to this value
+    TA1CCTL0 |= CCIE;          //enable interrupt
+    TA1CTL |= TASSEL_1 + MC_1; //SMCLK, Up Mode (Count to TA1CCR0)
 }
 
 void ConfigureUART(void){
     /* Configure hardware UART */
-    P1SEL |= BIT1 + BIT2;  //P1.1 = RXD, P1.2=TXD
-    P1SEL2 |= BIT1 + BIT2; //P1.1 = RXD, P1.2=TXD
+    P1SEL |= BIT1 + BIT2;  //P1.1 RXD, P1.2 TXD
+    P1SEL2 |= BIT1 + BIT2; //P1.1 RXD, P1.2 TXD
     UCA0CTL1 |= UCSSEL_2;  //Use SMCLK
-    UCA0BR0 = 0x68;        //Set baud rate to 9600 with 1MHz clock (Data Sheet 15.3.13)
-    UCA0BR1 = 0x00;        //Set baud rate to 9600 with 1MHz clock
+    UCA0BR0 = 0x68;        //baud rate to 9600 (1MHz clk)
+    UCA0BR1 = 0x00;        //baud rate to 9600 (1MHz clk)
     UCA0MCTL = UCBRS0;     //Modulation UCBRSx = 1
     UCA0CTL1 &= ~UCSWRST;  //Initialize USCI state machine
-    IE2 |= UCA0RXIE;       //Enable USCI_A0 RX interrupt
+    IE2 |= UCA0RXIE;       //Enable interrupt
 }
 
 void ConfigureSwitch(void){
     /* Configure Switches */
-    P1DIR &= ~BIT3; //Set button pin as an input pin
-    P1OUT |= BIT3;  //Set pull up resistor on for button
-    P1REN |= BIT3;  //Enable pull up resistor for button to keep pin high until pressed
-    P1IES |= BIT3;  //Trigger on the falling edge
-    P1IFG &= ~BIT3; //Clear the interrupt flag for the button
-    P1IE |= BIT3;   //Enable interrupts on port 1 for the button
+    P1DIR &= ~BIT3; //Set button as input 
+    P1OUT |= BIT3;  //Pull up resistor on 
+    P1REN |= BIT3;  //Enable pull up resistor
+    P1IES |= BIT3;  //Trigger on falling edge
+    P1IFG &= ~BIT3; //Clear interrupt flag 
+    P1IE |= BIT3;   //Enable interrupt
 }
 
 void ConfigureADC(void){
