@@ -1,4 +1,5 @@
-#include <msp430g2253.h>
+#include <msp430g2553.h>
+
 #define B1 0x0002
 #define B2 0x0001
 
@@ -6,13 +7,16 @@
 static int flag = 0;
 static int mode = 0;
 static int control = 0;
-static int climate = 0;
+static int blinkLimit = 1;
+static int override = 0;
+static int blinkLimitOverride = 0;
 static int low = 12;
 static int medium = 21;
 static int high = 25;
 static int *current = &low;
 static int newValue = 0;
-static int i=0;
+int value = 0;
+int reading = 21;
 
 
 
@@ -30,43 +34,45 @@ void ConfigureTimer0A(void);
 void ConfigureTimer1A(void);
 void ConfigureUART(void);
 void ConfigureSwitch(void);
+void ConfigureADC(void);
 
 
 void main(void)
-{
-    WDTCTL = WDTPW + WDTHOLD; // Stop WDT
-    BCSCTL1 = CALBC1_1MHZ;        // Set DCO Clock to 1MHz
-    DCOCTL = CALDCO_1MHZ;
+{   WDTCTL = WDTPW + WDTHOLD;     //stop WDT
+    BCSCTL1 = CALBC1_1MHZ;        //set DCO to 1MHz
+    DCOCTL = CALDCO_1MHZ;         //set DCO to 1mhz  
 
     /*** GPIO Set-Up ***/
-    P1DIR |= 0xFF;               //set all to outputs
-    P2DIR |= 0xFF;               //set all to outputs
-    P3DIR |= 0xFF;               //set all to outputs
-    P1OUT &= 0x00;               //Reset to 0
-    P2OUT &= 0x00;
-    P3OUT &= 0x00;
+    P1DIR |= 0xFF;             //set all to outputs
+    P2DIR |= 0xFF;             //set all to outputs
+    P3DIR |= 0xFF;             //set all to outputs
+    P1OUT &= 0x00;             //set all outputs to 0
+    P2OUT &= 0x00;             //set all outputs to 0 
+    P3OUT &= 0x00;             //set all outputs to 0
+    P1SEL &= 0x00;             //set p1sel to 0
 
-    P1SEL &= 0x00;
-    P1DIR |= BIT0;                  //P1.0 output
+    P1SEL |= BIT5;             //ADC input P1.5
+    P1DIR |= BIT0;             //P1.0 output
 
     ConfigureTimer0A();
     ConfigureTimer1A();
     ConfigureUART();
     ConfigureSwitch();
+    ConfigureADC();
 
-    // The Watchdog Timer (WDT) will be used to debounce s1 and B1
+    //setting up WDT to debounce button
     WDTCTL = WDTPW | WDTHOLD | WDTNMIES | WDTNMI; //WDT password + Stop WDT + detect RST button falling edge + set RST/NMI pin to NMI
-    IFG1 &= ~(WDTIFG | NMIIFG); // Clear the WDT and NMI interrupt flags
-    IE1 |= WDTIE | NMIIE; // Enable the WDT and NMI interrupts
-
-    _BIS_SR(CPUOFF + GIE);          // Enter LPM0 w/ interrupt
+    IFG1 &= ~(WDTIFG | NMIIFG); //reset WDT/NMI interrupt flags
+    IE1 |= WDTIE | NMIIE;       // Enable WDT/NMI interrupt
+    _BIS_SR(CPUOFF + GIE);      // Enter low power mode and enable interrupts
 }
 
 // Timer A0 interrupt service routine (for blinking light)
 #pragma vector=TIMER1_A0_VECTOR
-__interrupt void Timer1_A (void)
+__interrupt void TIMER1A_ISR (void)
 {
     if(!flag){
+        //toggles p1 at 3 times duty cycle
         control++;
         if (control == 3){
             P1OUT ^= BIT0; // Toggle P1.0
@@ -75,7 +81,37 @@ __interrupt void Timer1_A (void)
 
     }
     else {
-        P1OUT &= ~BIT0;
+        //if user is using RST button to override
+        if(override){
+            control++;
+            if (control == blinkLimitOverride){
+                P1OUT ^= BIT0; // Toggle P1.0
+                control = 0;
+            }
+        }
+        //if user hasn't chosen mode then RED LED off
+        else if (mode == 0)
+        {
+            P1OUT &= ~BIT0;
+        }
+        else{
+            ADC10CTL0 |= ENC + ADC10SC; // ADC Sampling and conversion start
+
+            if(value > reading){
+                blinkLimit = 6;
+            }
+            else if (value < reading){
+                blinkLimit = 1;
+            }
+            else{
+                blinkLimit = 0;
+            }
+            control++;
+            if (control == blinkLimit){
+                P1OUT ^= BIT0; // Toggle P1.0
+                control = 0;
+            }
+        }
     }
 }
 
@@ -84,11 +120,11 @@ __interrupt void PORT1_ISR(void)
 {
     if (P1IFG & BIT3)
     {
-        P1IE &= ~BIT3; // Disable Button interrupt to avoid bounces
-        P1IFG &= ~BIT3; // Clear the interrupt flag for the button
+        P1IE &= ~BIT3; //disable interrupts
+        P1IFG &= ~BIT3; //clear interrupt flag
         if (P1IES & BIT3)
-        { // Falling edge detected
-            Pressed |= B1; // Set Switch 2 Pressed flag
+        { //if falling edge detected
+            Pressed |= B1; //set button1 flag
             PressCountB1 = 0; // Reset Switch 2 long press count
         }
         else
@@ -100,11 +136,10 @@ __interrupt void PORT1_ISR(void)
         IFG1 &= ~WDTIFG; // Clear the interrupt flag for the WDT
         WDTCTL = WDT_MDLY_32 | (WDTCTL & 0x007F); // Restart the WDT with the same NMI status as set by the NMI interrupt
     }
-    else {/* add code here to handle other PORT1 interrupts, if any */}
 }
 
 #pragma vector = NMI_VECTOR
-__interrupt void nmi_isr(void)
+__interrupt void NMI_ISR(void)
 {
     if (IFG1 & NMIIFG) // Check if NMI interrupt was caused by nRST/NMI pin
     {
@@ -125,11 +160,10 @@ __interrupt void nmi_isr(void)
             WDTCTL = WDT_MDLY_32 | WDTNMIES | WDTNMI; // WDT 32ms delay + falling edge + set RST/NMI pin to NMI
         }
     } // Note that NMIIE is now cleared; the wdt_isr will set NMIIE 32ms later
-    else {/* add code here to handle other kinds of NMI, if any */}
 }
 
 #pragma vector = WDT_VECTOR
-__interrupt void wdt_isr(void)
+__interrupt void WDT_ISR(void)
 {
     if (Pressed & B1) // Check if switch 2 is pressed
     {
@@ -139,61 +173,79 @@ __interrupt void wdt_isr(void)
             P1SEL |= BIT6;
 
             if (++PressCountB1 == 125){
-                           P1DIR &= ~BIT6;                  //green LED (p1.6) off
-                           P1SEL &= ~BIT6;
-                           flag = ~flag;
-                           UARTSendArray("Standby\n\r", 9);
+                P1DIR &= ~BIT6;                  //green LED (p1.6) off
+                P1SEL &= ~BIT6;
+                flag = ~flag;
+                control = 0;
+                UARTSendArray("Standby\n\r", 9);
             }
 
             else if (++PressCountB1 == 16 ) // Long press duration 32*32ms = 1s
             {
                 TA0CCR1 &=0;                                             //reset ta0ccr1
                 switch(mode){
-                    case 0:
+                    case 1:
                         UARTSendArray("low\n\r", 5);
                         TA0CCR1 |= 1;
                         current = &low;
                         mode++;
                         break;
-                    case 1:
+                    case 2:
                         UARTSendArray("medium\n\r", 8);
                         TA0CCR1 |= 500;
                         current = &medium;
                         mode++;
                         break;
-                    case 2:
+                    case 3:
                         UARTSendArray("high\n\r", 6);
                         TA0CCR1 |= 1499;
                         current = &high;
-                        mode = 0;
+                        mode = 1;
                         break;
+                    default:
+                        mode = 1;
+
                 }
             }
         }
         else{ //if in standby
             if (++PressCountB1 == 16){
-                    flag = ~flag;
-                    P1OUT &= ~BIT0;
-                    UARTSendArray("Active\n\r", 8);
-           }
+                flag = ~flag;
+                P1OUT &= ~BIT0;
+                control = 0;
+                UARTSendArray("Active\n\r", 8);
+            }
         }
-   }
+    }
 
     if (Pressed & B2) // Check if switch 2 is pressed
-      {
-          if (++PressCountB2 == 32 ) // Long press duration 32ms*32 = 1s
-          {
-              climate = ~climate;
-                      if(climate){
-                          UARTSendArray("heat:", 4);
-                          UARTSendArray("\n\r",2);
-                      }
-                      else{
-                          UARTSendArray("cool:", 4);
-                          UARTSendArray("\n\r",2);
-                      }
-          }
-      }
+    {
+        if (++PressCountB2 == 32 ) // Long press duration 32ms*32 = 1s
+        {
+            if(override){ //if not in standby
+                if (++PressCountB1 == 125){
+                    override = 0;
+                    control = 0;
+                }
+
+                else if (++PressCountB1 == 16 ) // Long press duration 32*32ms = 1s
+                {
+                    if (blinkLimitOverride == 1)
+                    {blinkLimitOverride = 6;}
+                    else
+                    {blinkLimitOverride = 1;}
+
+                }
+
+            }
+            else{ //if in standby
+                if (++PressCountB1 == 125){
+                    override = 1;
+                    control = 0;
+                }
+            }
+        }
+    }
     IFG1 &= ~NMIIFG; // Clear the NMI interrupt flag (in case it has been set by bouncing)
     P1IFG &= ~BIT3; // Clear the button interrupt flag (in case it has been set by bouncing)
     IE1 |= NMIIE; // Re-enable the NMI interrupt to detect the next edge
@@ -267,6 +319,19 @@ __interrupt void USCI0RX_ISR(void)
 
 }
 
+// ADC10 interrupt service routine
+#pragma vector=ADC10_VECTOR
+__interrupt void ADC10_ISR (void)
+{
+    value = ADC10MEM; // read ADC value (note this is a 10bit value stored in a 16 bit register)
+    reading = 5 + (value-400)/600;
+    UARTSendArray("V:", 2);
+    UARTSendArray(numberStr,Int2DecStr(numberStr, value));
+    UARTSendArray("\n\r",2);
+
+
+}
+
 static const unsigned int dec[] = {
     10000, // +5
     1000, // +6
@@ -327,4 +392,11 @@ void ConfigureSwitch(void){
     P1IES |= BIT3; // Enable Interrupt to trigger on the falling edge (high (unpressed) to low (pressed) transition)
     P1IFG &= ~BIT3; // Clear the interrupt flag for the button
     P1IE |= BIT3; // Enable interrupts on port 1 for the button
+}
+
+void ConfigureADC(void){
+    /* Configure ADC  Channel */
+    ADC10CTL1 = INCH_5;         //Channel 5, ADC10CLK/4
+    ADC10CTL0 = SREF_1 + ADC10SHT_2 + REFON + REF2_5V + ADC10ON + ADC10IE;  //Vref,adc clock 16 cycles, vref on, vref to 2.5V, ADC10 converter on, ADC interrupt enabled
+    ADC10AE0 |= BIT5;                         //P1.5 ADC option
 }
